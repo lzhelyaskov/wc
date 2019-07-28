@@ -1,0 +1,2 @@
+# wc
+count words
