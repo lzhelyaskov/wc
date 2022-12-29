@@ -4,14 +4,13 @@ use getopts::Options;
 use std::{
     cmp,
     collections::HashMap,
-    error::Error as _,
     fmt,
     fs::File,
     io::{self, Read, Write},
     path::Path,
 };
 
-pub type Format = fn(WordCountVec, Box<Write>) -> Result<(), io::Error>;
+pub type Format = fn(WordCountVec, Box<dyn Write>) -> Result<(), io::Error>;
 pub type SortBy = fn(&WordPair, &WordPair) -> cmp::Ordering;
 pub type Dictionary = HashMap<String, u32>;
 pub type WordPair = (String, u32);
@@ -20,7 +19,7 @@ type ParseArgsResult =
     Result<(WordCountParams, Option<Vec<String>>, Option<String>, Format), ParamsError>;
 
 #[derive(Debug)]
-pub enum MyError {
+pub enum WcError {
     OpenFile(String, io::Error),
     ReadFile(String, io::Error),
     ReadDir(String, io::Error),
@@ -29,32 +28,32 @@ pub enum MyError {
     InvalidPath(String),
 }
 
-impl fmt::Display for MyError {
+impl fmt::Display for WcError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self {
-            MyError::OpenFile(path, io_err) => {
+            WcError::OpenFile(path, io_err) => {
                 write!(f, "failed to open file: {}. io error: {}", path, io_err)
             }
-            MyError::ReadFile(path, io_err) => {
+            WcError::ReadFile(path, io_err) => {
                 write!(f, "failed to read file: {}. io error: {}", path, io_err)
             }
-            MyError::ReadDir(path, io_err) => write!(
+            WcError::ReadDir(path, io_err) => write!(
                 f,
                 "failed to read directory: {}. io error: {}",
                 path, io_err
             ),
-            MyError::ReadStdIn(io_err) => {
+            WcError::ReadStdIn(io_err) => {
                 write!(f, "failed to read from stdin. io error: {}", io_err)
             }
-            MyError::NotFileNorDir(path) => {
+            WcError::NotFileNorDir(path) => {
                 write!(f, "path {} is not a directory nor a file", path)
             }
-            MyError::InvalidPath(path) => write!(f, "invalid path: {}", path),
+            WcError::InvalidPath(path) => write!(f, "invalid path: {}", path),
         }
     }
 }
 
-impl std::error::Error for MyError {}
+impl std::error::Error for WcError {}
 
 #[derive(Debug)]
 struct ParamsError {
@@ -155,7 +154,7 @@ impl WordCount {
     }
 
     /// counts words in a file provided by path
-    fn from_file(&mut self, path: &Path) -> Result<(), MyError> {
+    fn from_file(&mut self, path: &Path) -> Result<(), WcError> {
         File::open(path)
             .and_then(|mut file| file.read_to_string(&mut self.buf))
             .and_then(|_| {
@@ -163,17 +162,17 @@ impl WordCount {
                 self.buf.clear();
                 Ok(())
             })
-            .map_err(|res| MyError::ReadFile(path.display().to_string(), res))
+            .map_err(|res| WcError::ReadFile(path.display().to_string(), res))
     }
 
     /// counts words in files and / or in a directory provided by path
-    fn from_dir(&mut self, path: &Path) -> Result<(), MyError> {
+    fn from_dir(&mut self, path: &Path) -> Result<(), WcError> {
         path.read_dir()
-            .map_err(|err| MyError::ReadDir(path.display().to_string(), err))
+            .map_err(|err| WcError::ReadDir(path.display().to_string(), err))
             .and_then(|mut read_dir| {
                 let iter = read_dir.try_for_each(|entry_path| {
                     entry_path
-                        .map_err(|err| MyError::ReadFile(path.display().to_string(), err))
+                        .map_err(|err| WcError::ReadFile(path.display().to_string(), err))
                         .and_then(|entry_path| {
                             let path = entry_path.path();
                             if path.is_dir() && self.params.recursive {
@@ -189,7 +188,7 @@ impl WordCount {
     }
 
     /// counts words read from stdin
-    fn from_stdin(&mut self) -> Result<(), MyError> {
+    fn from_stdin(&mut self) -> Result<(), WcError> {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
 
@@ -200,13 +199,13 @@ impl WordCount {
                 self.buf.clear();
                 Ok(())
             })
-            .map_err(|err| MyError::ReadStdIn(err))
+            .map_err(|err| WcError::ReadStdIn(err))
     }
 
     /// collects word counts and returns them as vector of touples where
     /// the first value is a String representation of the word and
     /// the second value is a u32 number of occurances
-    pub fn collect(mut self, in_path: Option<Vec<String>>) -> Result<WordCountVec, MyError> {
+    pub fn collect(mut self, in_path: Option<Vec<String>>) -> Result<WordCountVec, WcError> {
         match in_path {
             None => {
                 if let Err(err) = self.from_stdin() {
@@ -218,13 +217,13 @@ impl WordCount {
                     let path = Path::new(&src);
                     if let Err(e) = {
                         if !path.exists() {
-                            Err(MyError::InvalidPath(src.to_string()))
+                            Err(WcError::InvalidPath(src.to_string()))
                         } else if dbg!(path.is_file()) {
                             self.from_file(path)
                         } else if dbg!(path.is_dir()) {
                             self.from_dir(path)
                         } else {
-                            Err(MyError::NotFileNorDir(src.to_string()))
+                            Err(WcError::NotFileNorDir(src.to_string()))
                         }
                     } {
                         return Err(e);
@@ -267,7 +266,7 @@ fn main() {
         }
     };
 
-    let writer: Box<Write> = {
+    let writer: Box<dyn Write> = {
         if let Some(path) = out_path {
             match File::create(&path) {
                 Ok(file) => Box::new(file),
@@ -275,7 +274,7 @@ fn main() {
                     eprintln!(
                         "failed to create file: {}. error: {}",
                         &path,
-                        error.description()
+                        error.to_string()
                     );
                     return;
                 }
@@ -291,7 +290,7 @@ fn main() {
 }
 
 /// writes items
-fn plain(items: WordCountVec, mut writer: Box<Write>) -> Result<(), io::Error> {
+fn plain(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
     for (key, value) in items {
         write!(*writer, "{} {}\n", key, value)?;
     }
@@ -299,7 +298,7 @@ fn plain(items: WordCountVec, mut writer: Box<Write>) -> Result<(), io::Error> {
 }
 
 /// writes items formatted as csv
-fn csv(items: WordCountVec, mut writer: Box<Write>) -> Result<(), io::Error> {
+fn csv(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
     write!(*writer, "word, count\n")?;
     for (key, value) in items {
         write!(*writer, "\"{}\", {}\n", key, value)?;
@@ -308,7 +307,7 @@ fn csv(items: WordCountVec, mut writer: Box<Write>) -> Result<(), io::Error> {
 }
 
 /// writes items as json
-fn json(items: WordCountVec, mut writer: Box<Write>) -> Result<(), io::Error> {
+fn json(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
     write!(*writer, "{{\n\t\"wordCount\": [\n")?;
     for (key, value) in items {
         write!(*writer, "\t\t\"{}\": {},\n", key, value)?;
@@ -415,7 +414,7 @@ fn parse_args(args: Vec<String>) -> ParseArgsResult {
         None => plain,
     };
 
-    let sort_by_fn: Option<SortBy> = match matches.opt_str("s") {
+    let sort_by: Option<SortBy> = match matches.opt_str("s") {
         Some(s) => match s.to_lowercase().as_ref() {
             "count" => Some(count_asc),
             "count-desc" => Some(count_desc),
@@ -428,9 +427,9 @@ fn parse_args(args: Vec<String>) -> ParseArgsResult {
 
     Ok((
         WordCountParams {
-            ignore_case: ignore_case,
-            recursive: recursive,
-            sort_by: sort_by_fn,
+            ignore_case,
+            recursive,
+            sort_by,
         },
         in_path,
         out_path,
