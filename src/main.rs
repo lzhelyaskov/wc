@@ -65,8 +65,7 @@ impl ParamsError {
         ParamsError {
             desc: {
                 let brief = format!("Usage: {} [options]", program);
-                let s = options.usage(&brief);
-                format!("{}", s)
+                options.usage(&brief)
             },
         }
     }
@@ -112,6 +111,7 @@ impl std::error::Error for ParamsError {
 }
 
 /// holds parameters for WordCount
+#[derive(Default)]
 pub struct WordCountParams {
     /// disables case sensitivity
     /// if true "Example" and "eXample" are counted as the same word.
@@ -120,16 +120,6 @@ pub struct WordCountParams {
     recursive: bool,
     /// controls if and how output should be sorted
     sort_by: Option<SortBy>,
-}
-
-impl Default for WordCountParams {
-    fn default() -> Self {
-        WordCountParams {
-            ignore_case: false,
-            recursive: false,
-            sort_by: None,
-        }
-    }
 }
 
 /**
@@ -147,59 +137,56 @@ pub struct WordCount {
 impl WordCount {
     pub fn new(params: WordCountParams) -> Self {
         WordCount {
-            params: params,
+            params,
             buf: String::new(),
             map: HashMap::new(),
         }
     }
 
     /// counts words in a file provided by path
-    fn from_file(&mut self, path: &Path) -> Result<(), WcError> {
+    fn read_file(&mut self, path: &Path) -> Result<(), WcError> {
         File::open(path)
             .and_then(|mut file| file.read_to_string(&mut self.buf))
-            .and_then(|_| {
+            .map(|_| {
                 count_words(&self.buf, &mut self.map, self.params.ignore_case);
                 self.buf.clear();
-                Ok(())
             })
             .map_err(|res| WcError::ReadFile(path.display().to_string(), res))
     }
 
     /// counts words in files and / or in a directory provided by path
-    fn from_dir(&mut self, path: &Path) -> Result<(), WcError> {
+    fn read_dir(&mut self, path: &Path) -> Result<(), WcError> {
         path.read_dir()
             .map_err(|err| WcError::ReadDir(path.display().to_string(), err))
             .and_then(|mut read_dir| {
-                let iter = read_dir.try_for_each(|entry_path| {
+                read_dir.try_for_each(|entry_path| {
                     entry_path
                         .map_err(|err| WcError::ReadFile(path.display().to_string(), err))
                         .and_then(|entry_path| {
                             let path = entry_path.path();
                             if path.is_dir() && self.params.recursive {
-                                self.from_dir(&path)
+                                self.read_dir(&path)
                             } else {
-                                self.from_file(&path)
+                                self.read_file(&path)
                             }
                         })
-                });
-                iter
+                })
             })
-            .and_then(|_| Ok(()))
+            .map(|_| ())
     }
 
     /// counts words read from stdin
-    fn from_stdin(&mut self) -> Result<(), WcError> {
+    fn read_stdin(&mut self) -> Result<(), WcError> {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
 
         handle
             .read_to_string(&mut self.buf)
-            .and_then(|_| {
+            .map(|_| {
                 count_words(&self.buf, &mut self.map, self.params.ignore_case);
                 self.buf.clear();
-                Ok(())
             })
-            .map_err(|err| WcError::ReadStdIn(err))
+            .map_err(WcError::ReadStdIn)
     }
 
     /// collects word counts and returns them as vector of touples where
@@ -208,26 +195,22 @@ impl WordCount {
     pub fn collect(mut self, in_path: Option<Vec<String>>) -> Result<WordCountVec, WcError> {
         match in_path {
             None => {
-                if let Err(err) = self.from_stdin() {
-                    return Err(err);
-                }
+                self.read_stdin()?;
             }
             Some(paths) => {
                 for src in &paths {
                     let path = Path::new(&src);
-                    if let Err(e) = {
+                    {
                         if !path.exists() {
                             Err(WcError::InvalidPath(src.to_string()))
                         } else if dbg!(path.is_file()) {
-                            self.from_file(path)
+                            self.read_file(path)
                         } else if dbg!(path.is_dir()) {
-                            self.from_dir(path)
+                            self.read_dir(path)
                         } else {
                             Err(WcError::NotFileNorDir(src.to_string()))
                         }
-                    } {
-                        return Err(e);
-                    }
+                    }?
                 }
             }
         }
@@ -274,7 +257,7 @@ fn main() {
                     eprintln!(
                         "failed to create file: {}. error: {}",
                         &path,
-                        error.to_string()
+                        error
                     );
                     return;
                 }
@@ -292,27 +275,27 @@ fn main() {
 /// writes items
 fn plain(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
     for (key, value) in items {
-        write!(*writer, "{} {}\n", key, value)?;
+        writeln!(*writer, "{} {}", key, value)?;
     }
     Ok(())
 }
 
 /// writes items formatted as csv
 fn csv(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
-    write!(*writer, "word, count\n")?;
+    writeln!(*writer, "word, count")?;
     for (key, value) in items {
-        write!(*writer, "\"{}\", {}\n", key, value)?;
+        writeln!(*writer, "\"{}\", {}", key, value)?;
     }
     Ok(())
 }
 
 /// writes items as json
 fn json(items: WordCountVec, mut writer: Box<dyn Write>) -> Result<(), io::Error> {
-    write!(*writer, "{{\n\t\"wordCount\": [\n")?;
+    writeln!(*writer, "{{\n\t\"wordCount\": [")?;
     for (key, value) in items {
-        write!(*writer, "\t\t\"{}\": {},\n", key, value)?;
+        writeln!(*writer, "\t\t\"{}\": {},", key, value)?;
     }
-    write!(*writer, "\t]\n}}")
+    writeln!(*writer, "\t]}}")
 }
 
 /// sort by word count ascending
@@ -440,7 +423,7 @@ fn parse_args(args: Vec<String>) -> ParseArgsResult {
 pub fn count_words(s: &str, map: &mut Dictionary, ignore_case: bool) {
     let words = s.split(|c: char| !c.is_alphabetic());
     let case: &dyn Fn(&str) -> String = if dbg!(ignore_case) {
-        &|s: &str| s.to_lowercase().to_string()
+        &|s: &str| s.to_lowercase()
     } else {
         &|s: &str| s.to_string()
     };
